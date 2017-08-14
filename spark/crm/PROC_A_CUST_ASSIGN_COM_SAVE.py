@@ -1,0 +1,379 @@
+#coding=UTF-8
+from pyspark import SparkContext, SparkConf, SQLContext, Row, HiveContext
+from pyspark.sql.types import *
+from datetime import date, datetime, timedelta
+import sys, re, os
+
+st = datetime.now()
+conf = SparkConf().setAppName('PROC_A_CUST_ASSIGN_COM_SAVE').setMaster(sys.argv[2])
+sc = SparkContext(conf = conf)
+sc.setLogLevel('WARN')
+if len(sys.argv) > 5:
+    if sys.argv[5] == "hive":
+        sqlContext = HiveContext(sc)
+else:
+    sqlContext = SQLContext(sc)
+hdfs = sys.argv[3]
+dbname = sys.argv[4]
+
+#处理需要使用的日期
+etl_date = sys.argv[1]
+#etl日期
+V_DT = etl_date  
+#上一日日期
+V_DT_LD = (date(int(etl_date[0:4]), int(etl_date[4:6]), int(etl_date[6:8])) + timedelta(-1)).strftime("%Y%m%d")
+#月初日期
+V_DT_FMD = date(int(etl_date[0:4]), int(etl_date[4:6]), 1).strftime("%Y%m%d") 
+#上月末日期
+V_DT_LMD = (date(int(etl_date[0:4]), int(etl_date[4:6]), 1) + timedelta(-1)).strftime("%Y%m%d")
+#10位日期
+V_DT10 = (date(int(etl_date[0:4]), int(etl_date[4:6]), int(etl_date[6:8]))).strftime("%Y-%m-%d")
+V_STEP = 0
+
+ADMIN_AUTH_ORG = sqlContext.read.parquet(hdfs+'/ADMIN_AUTH_ORG/*')
+ADMIN_AUTH_ORG.registerTempTable("ADMIN_AUTH_ORG")
+ACRM_F_DP_SAVE_INFO = sqlContext.read.parquet(hdfs+'/ACRM_F_DP_SAVE_INFO/*')
+ACRM_F_DP_SAVE_INFO.registerTempTable("ACRM_F_DP_SAVE_INFO")
+CUSTOMER_BELONG_TMP = sqlContext.read.parquet(hdfs+'/CUSTOMER_BELONG_TMP/*')
+CUSTOMER_BELONG_TMP.registerTempTable("CUSTOMER_BELONG_TMP")
+OCRM_CUST_AUM_VALUE = sqlContext.read.parquet(hdfs+'/OCRM_CUST_AUM_VALUE/*')
+OCRM_CUST_AUM_VALUE.registerTempTable("OCRM_CUST_AUM_VALUE")
+OCRM_CUST_AUM_VALUE1 = sqlContext.read.parquet(hdfs+'/OCRM_CUST_AUM_VALUE1/*')
+OCRM_CUST_AUM_VALUE1.registerTempTable("OCRM_CUST_AUM_VALUE1")
+UNIT_CUST_B = sqlContext.read.parquet(hdfs+'/UNIT_CUST_B/*')
+UNIT_CUST_B.registerTempTable("UNIT_CUST_B")
+
+#任务[21] 001-01::
+V_STEP = V_STEP + 1
+
+sql = """
+ SELECT A.ODS_CUSTOM_ID         AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,''                    AS CUST_STS 
+       ,''                    AS BRANCH 
+       ,'1'                     AS TYPE1 
+       ,''                    AS MANGER_NO 
+       ,'1'                     AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM CUSTOMER_BELONG_TMP A                                  --待分配客户临时表
+   LEFT JOIN UNIT_CUST_B B                                     --对公分配中间表B
+     ON A.ODS_CUSTOM_ID         = B.ODS_CUST_ID 
+    AND B.FR_ID                 = A.FR_ID 
+  WHERE A.CUST_TYP              = '2' 
+    AND A.CUST_STS              = '1' 
+    AND B.FR_ID IS NULL """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A = sqlContext.sql(sql)
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A.cache()
+nrows = UNIT_CUST_A.count()
+ret = os.system("hdfs dfs -rm -r /"+dbname+"/UNIT_CUST_A/*.parquet")
+UNIT_CUST_A.write.save(path=hdfs + '/' + dfn, mode='overwrite')
+UNIT_CUST_A.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrows)
+
+#任务[12] 001-02::
+V_STEP = V_STEP + 1
+
+sql = """
+ SELECT A.ODS_CUST_ID           AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,A.CUST_STS              AS CUST_STS 
+       ,B.ORG_ID                AS BRANCH 
+       ,A.TYPE1                 AS TYPE1 
+       ,B.CUST_MGR              AS MANGER_NO 
+       ,A.TYPE2                 AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+  INNER JOIN OCRM_CUST_AUM_VALUE1 B                            --客户-经理存款AUM
+     ON A.ODS_CUST_ID           = B.CUST_ID 
+    AND A.FR_ID                 = B.FR_ID 
+    AND B.RANK                  = 1 """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP1 = sqlContext.sql(sql)
+UNIT_CUST_A_INNTMP1.registerTempTable("UNIT_CUST_A_INNTMP1")
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+sql = """
+ SELECT DST.ODS_CUST_ID                                         --客户号:src.ODS_CUST_ID
+       ,DST.CUST_NAME                                          --客户名称:src.CUST_NAME
+       ,DST.CERT_TYP                                           --证件类型:src.CERT_TYP
+       ,DST.CERT_NO                                            --证件号码:src.CERT_NO
+       ,DST.CUST_STS                                           --客户状态:src.CUST_STS
+       ,DST.BRANCH                                             --机构:src.BRANCH
+       ,DST.TYPE1                                              --类型1:src.TYPE1
+       ,DST.MANGER_NO                                          --经理号:src.MANGER_NO
+       ,DST.TYPE2                                              --类型2:src.TYPE2
+       ,DST.FR_ID                                              --法人号:src.FR_ID
+   FROM UNIT_CUST_A DST 
+   LEFT JOIN UNIT_CUST_A_INNTMP1 SRC 
+     ON SRC.ODS_CUST_ID         = DST.ODS_CUST_ID 
+    AND SRC.FR_ID               = DST.FR_ID 
+  WHERE SRC.ODS_CUST_ID IS NULL """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP2 = sqlContext.sql(sql)
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A_INNTMP2=UNIT_CUST_A_INNTMP2.unionAll(UNIT_CUST_A_INNTMP1)
+UNIT_CUST_A_INNTMP1.cache()
+UNIT_CUST_A_INNTMP2.cache()
+nrowsi = UNIT_CUST_A_INNTMP1.count()
+nrowsa = UNIT_CUST_A_INNTMP2.count()
+UNIT_CUST_A_INNTMP2.write.save(path = hdfs + '/' + dfn, mode='overwrite')
+UNIT_CUST_A_INNTMP1.unpersist()
+UNIT_CUST_A_INNTMP2.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d, all lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrowsi, nrowsa)
+ret = os.system("hdfs dfs -mv /"+dbname+"/UNIT_CUST_A/"+V_DT_LD+".parquet /"+dbname+"/UNIT_CUST_A_BK/")
+ret = os.system("hdfs dfs -rm -r /"+dbname+"/UNIT_CUST_A/"+V_DT_LD+".parquet ")
+
+#任务[11] 001-03::
+V_STEP = V_STEP + 1
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+
+sql = """
+ SELECT DISTINCT A.ODS_CUST_ID           AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,A.CUST_STS              AS CUST_STS 
+       ,B.ORG_ID                AS BRANCH 
+       ,CASE WHEN B.ORG_ID                = A.BRANCH THEN '1' ELSE '2' END                     AS TYPE1 
+       ,B.CONNTR_NO             AS MANGER_NO 
+       ,'2'                     AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+  INNER JOIN ACRM_F_DP_SAVE_INFO B                             --负债协议
+     ON A.ODS_CUST_ID           = B.CUST_ID 
+    AND A.FR_ID                 = B.FR_ID 
+    AND A.MANGER_NO <> B.CONNTR_NO 
+    AND B.BAL_RMB > 0 
+    AND B.ACCT_STATUS           = '01' 
+  WHERE A.BRANCH IS 
+    NOT NULL 
+    AND A.MANGER_NO IS 
+    NOT NULL 
+    AND A.TYPE1                 = '1' 
+    AND A.TYPE2                 = '1'  """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A = sqlContext.sql(sql)
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A.cache()
+nrows = UNIT_CUST_A.count()
+UNIT_CUST_A.write.save(path=hdfs + '/' + dfn, mode='append')
+UNIT_CUST_A.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrows)
+
+#任务[12] 001-04::
+V_STEP = V_STEP + 1
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+
+sql = """
+ SELECT A.ODS_CUST_ID           AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,A.CUST_STS              AS CUST_STS 
+       ,B.ORG_ID                AS BRANCH 
+       ,A.TYPE1                 AS TYPE1 
+       ,A.MANGER_NO             AS MANGER_NO 
+       ,A.TYPE2                 AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+  INNER JOIN OCRM_CUST_AUM_VALUE B                             --客户-机构存款AUM
+     ON A.ODS_CUST_ID           = B.CUST_ID 
+    AND A.FR_ID                 = B.FR_ID 
+    AND B.RANK                  = '1' 
+  WHERE A.MANGER_NO IS NULL 
+    AND A.TYPE2                 = '1' """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP1 = sqlContext.sql(sql)
+UNIT_CUST_A_INNTMP1.registerTempTable("UNIT_CUST_A_INNTMP1")
+
+sql = """
+ SELECT DST.ODS_CUST_ID                                         --客户号:src.ODS_CUST_ID
+       ,DST.CUST_NAME                                          --客户名称:src.CUST_NAME
+       ,DST.CERT_TYP                                           --证件类型:src.CERT_TYP
+       ,DST.CERT_NO                                            --证件号码:src.CERT_NO
+       ,DST.CUST_STS                                           --客户状态:src.CUST_STS
+       ,DST.BRANCH                                             --机构:src.BRANCH
+       ,DST.TYPE1                                              --类型1:src.TYPE1
+       ,DST.MANGER_NO                                          --经理号:src.MANGER_NO
+       ,DST.TYPE2                                              --类型2:src.TYPE2
+       ,DST.FR_ID                                              --法人号:src.FR_ID
+   FROM UNIT_CUST_A DST 
+   LEFT JOIN UNIT_CUST_A_INNTMP1 SRC 
+     ON SRC.ODS_CUST_ID         = DST.ODS_CUST_ID 
+    AND SRC.TYPE2               = DST.TYPE2 
+    AND SRC.FR_ID               = DST.FR_ID 
+  WHERE SRC.ODS_CUST_ID IS NULL """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP2 = sqlContext.sql(sql)
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A_INNTMP2=UNIT_CUST_A_INNTMP2.unionAll(UNIT_CUST_A_INNTMP1)
+UNIT_CUST_A_INNTMP1.cache()
+UNIT_CUST_A_INNTMP2.cache()
+nrowsi = UNIT_CUST_A_INNTMP1.count()
+nrowsa = UNIT_CUST_A_INNTMP2.count()
+UNIT_CUST_A_INNTMP2.write.save(path = hdfs + '/' + dfn, mode='overwrite')
+UNIT_CUST_A_INNTMP1.unpersist()
+UNIT_CUST_A_INNTMP2.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d, all lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrowsi, nrowsa)
+ret = os.system("hdfs dfs -mv /"+dbname+"/UNIT_CUST_A/"+V_DT_LD+".parquet /"+dbname+"/UNIT_CUST_A_BK/")
+
+#任务[11] 001-05::
+V_STEP = V_STEP + 1
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+
+sql = """
+ SELECT A.ODS_CUST_ID           AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,A.CUST_STS              AS CUST_STS 
+       ,B.ORG_ID                AS BRANCH 
+       ,'2'                     AS TYPE1 
+       ,A.MANGER_NO             AS MANGER_NO 
+       ,A.TYPE2                 AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+  INNER JOIN OCRM_CUST_AUM_VALUE B                             --客户-机构存款AUM
+     ON A.ODS_CUST_ID           = B.CUST_ID 
+    AND A.FR_ID                 = B.FR_ID 
+    AND A.BRANCH <> B.ORG_ID 
+  WHERE A.BRANCH IS 
+    NOT NULL 
+    AND A.MANGER_NO IS NULL 
+    AND A.TYPE1                 = '1' 
+    AND A.TYPE2                 = '1' """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A = sqlContext.sql(sql)
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A.cache()
+nrows = UNIT_CUST_A.count()
+UNIT_CUST_A.write.save(path=hdfs + '/' + dfn, mode='append')
+UNIT_CUST_A.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrows)
+
+#任务[12] 001-06::
+V_STEP = V_STEP + 1
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+
+sql = """
+ SELECT A.ODS_CUST_ID           AS ODS_CUST_ID 
+       ,A.CUST_NAME             AS CUST_NAME 
+       ,A.CERT_TYP              AS CERT_TYP 
+       ,A.CERT_NO               AS CERT_NO 
+       ,A.CUST_STS              AS CUST_STS 
+       ,B.ORG_ID                AS BRANCH 
+       ,A.TYPE1                 AS TYPE1 
+       ,A.MANGER_NO             AS MANGER_NO 
+       ,A.TYPE2                 AS TYPE2 
+       ,A.FR_ID                 AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+  INNER JOIN(
+         SELECT DISTINCT ORG_ID 
+               ,FR_ID 
+           FROM ADMIN_AUTH_ORG 
+          WHERE UP_ORG_ID               = '320000000') B       --机构表
+     ON A.FR_ID                 = B.FR_ID 
+  WHERE A.BRANCH IS NULL 
+    AND A.MANGER_NO IS NULL """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP1 = sqlContext.sql(sql)
+UNIT_CUST_A_INNTMP1.registerTempTable("UNIT_CUST_A_INNTMP1")
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+sql = """
+ SELECT DST.ODS_CUST_ID                                         --客户号:src.ODS_CUST_ID
+       ,DST.CUST_NAME                                          --客户名称:src.CUST_NAME
+       ,DST.CERT_TYP                                           --证件类型:src.CERT_TYP
+       ,DST.CERT_NO                                            --证件号码:src.CERT_NO
+       ,DST.CUST_STS                                           --客户状态:src.CUST_STS
+       ,DST.BRANCH                                             --机构:src.BRANCH
+       ,DST.TYPE1                                              --类型1:src.TYPE1
+       ,DST.MANGER_NO                                          --经理号:src.MANGER_NO
+       ,DST.TYPE2                                              --类型2:src.TYPE2
+       ,DST.FR_ID                                              --法人号:src.FR_ID
+   FROM UNIT_CUST_A DST 
+   LEFT JOIN UNIT_CUST_A_INNTMP1 SRC 
+     ON SRC.ODS_CUST_ID         = DST.ODS_CUST_ID 
+    AND SRC.TYPE1               = DST.TYPE1 
+    AND SRC.TYPE2               = DST.TYPE2 
+    AND SRC.FR_ID               = DST.FR_ID 
+  WHERE SRC.ODS_CUST_ID IS NULL """
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_A_INNTMP2 = sqlContext.sql(sql)
+dfn="UNIT_CUST_A/"+V_DT+".parquet"
+UNIT_CUST_A_INNTMP2=UNIT_CUST_A_INNTMP2.unionAll(UNIT_CUST_A_INNTMP1)
+UNIT_CUST_A_INNTMP1.cache()
+UNIT_CUST_A_INNTMP2.cache()
+nrowsi = UNIT_CUST_A_INNTMP1.count()
+nrowsa = UNIT_CUST_A_INNTMP2.count()
+UNIT_CUST_A_INNTMP2.write.save(path = hdfs + '/' + dfn, mode='overwrite')
+UNIT_CUST_A_INNTMP1.unpersist()
+UNIT_CUST_A_INNTMP2.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_A lines %d, all lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrowsi, nrowsa)
+ret = os.system("hdfs dfs -mv /"+dbname+"/UNIT_CUST_A/"+V_DT_LD+".parquet /"+dbname+"/UNIT_CUST_A_BK/")
+ret = os.system("hdfs dfs -rm -r /"+dbname+"/UNIT_CUST_A/"+V_DT_LD+".parquet ")
+
+#任务[11] 001-07::
+V_STEP = V_STEP + 1
+
+UNIT_CUST_A = sqlContext.read.parquet(hdfs+'/UNIT_CUST_A/*')
+UNIT_CUST_A.registerTempTable("UNIT_CUST_A")
+
+sql = """
+ SELECT ODS_CUST_ID             AS ODS_CUST_ID 
+       ,CUST_NAME               AS CUST_NAME 
+       ,CERT_TYP                AS CERT_TYP 
+       ,CERT_NO                 AS CERT_NO 
+       ,CUST_STS                AS CUST_STS 
+       ,BRANCH                  AS BRANCH 
+       ,TYPE1                   AS TYPE1 
+       ,MANGER_NO               AS MANGER_NO 
+       ,CASE WHEN MANGER_NO IS 
+    NOT NULL THEN TYPE2 ELSE NULL END                     AS TYPE2 
+       ,FR_ID                   AS FR_ID 
+   FROM UNIT_CUST_A A                                          --对公分配中间表A
+"""
+
+sql = re.sub(r"\bV_DT\b", "'"+V_DT10+"'", sql)
+UNIT_CUST_B = sqlContext.sql(sql)
+UNIT_CUST_B.registerTempTable("UNIT_CUST_B")
+dfn="UNIT_CUST_B/"+V_DT+"_02.parquet"
+UNIT_CUST_B.cache()
+nrows = UNIT_CUST_B.count()
+UNIT_CUST_B.write.save(path=hdfs + '/' + dfn, mode='overwrite')
+UNIT_CUST_B.unpersist()
+et = datetime.now()
+print("Step %d start[%s] end[%s] use %d seconds, insert UNIT_CUST_B lines %d") % (V_STEP, st.strftime("%H:%M:%S"), et.strftime("%H:%M:%S"), (et-st).seconds, nrows)

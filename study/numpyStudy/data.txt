@@ -1,0 +1,3 @@
+data\bat\batman.jpg,2
+data\cat\hellokitty.jpg,0
+data\dog\snoopy.jpg,1
