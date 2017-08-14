@@ -4,6 +4,7 @@ import os
 import sys
 import datetime
 import re
+
 allFileNum = 0
 today = datetime.date.today()
 
@@ -34,7 +35,7 @@ def printPath(level, path, path1):
             fileList.append(f)
             # 当一个标志使用，文件夹列表第一个级别不打印
     i = 0
-    file1 = open(path1 + str(today) + ".txt","a")
+    file1 = open(path1 + str(today) + ".txt", "a")
     for fl in fileList:
         # 打印文件
 
@@ -42,43 +43,43 @@ def printPath(level, path, path1):
         j = 0
         if (i == 0):
             line = file.read()
-            line = line.replace(" ","").replace("\\t","").replace(chr(9),'')
+            line = line.replace(" ", "").replace("\\t", "").replace(chr(9), '')
             file1.write(line)
-            print file1
+            print(file1)
         else:
             line = file.readline()
             while line:
                 if (j == 0):
-                    print line
+                    print(line)
                     pass
                 else:
-                    line = line.replace(" ","").replace("\\t","").replace(chr(9),'')
+                    line = line.replace(" ", "").replace("\\t", "").replace(chr(9), '')
                     line = line.split(',')
-                    print len(line[2])
-                    if(len(line[2]) == 11):
+                    print(len(line[2]))
+                    if (len(line[2]) == 11):
                         tmp = line[2]
                         str11 = tmp[0:8]
                         str21 = tmp[9:]
                         line[2] = str11 + '-' + str21
-#                        print line[2]
+                    # print line[2]
                     line = ','.join(line)
                     file1.writelines(line)
-                j+=1
+                j += 1
                 line = file.readline()
         file.close()
-        print fl
+        print(fl)
         i += 1
-        print i
+        print(i)
         # 随便计算一下有多少个文件
         allFileNum = allFileNum + 1
     file1.close()
 
 
 if __name__ == '__main__':
-#    directory = sys.argv[1]
-    src_dir = 'C:\Users\Administrator\Desktop\\20170531\\'
-    des_dir = 'C:\Users\Administrator\Desktop\\1\\'
-#    src_dir = sys.argv[1]
-#    des_dir = sys.argv[2]
-    printPath(1,src_dir,des_dir )
-    print 'total number of files is ', allFileNum
+    #    directory = sys.argv[1]
+    src_dir = 'C:\\Users\\CYSUNCN\\Desktop\\2017\\'
+    des_dir = 'C:\\Users\\CYSUNCN\\Desktop\\1\\'
+    #    src_dir = sys.argv[1]
+    #    des_dir = sys.argv[2]
+    printPath(1, src_dir, des_dir)
+    print('total number of files is ', allFileNum)
